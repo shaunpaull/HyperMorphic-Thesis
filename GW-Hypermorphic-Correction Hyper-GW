@@ -323,3 +323,365 @@ if __name__ == "__main__":
         print("\nCRITICAL: Real data acquisition failed. Cannot run the Falsifier test.")
 
     print("\n\n=== Analysis Complete ===")
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+"""
+HyperMorphic Gravitational Wave Analysis
+Framework V21: Multi-Detector Falsifier
+"""
+
+# --- Step 0: Installation for Google Colab & Imports ---
+try:
+    import gwpy
+except ImportError:
+    print("Installing gwpy... (requires internet connection)")
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "gwpy"])
+    print("gwpy installed.")
+
+try:
+    import pycbc
+except ImportError:
+    print("Installing pycbc... (requires internet connection, may take a moment)")
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pycbc"])
+    print("pycbc installed.")
+
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from scipy import signal, fft
+from scipy.signal import stft, correlate2d
+from gwpy.timeseries import TimeSeries
+from gwpy.signal import filter_design
+from scipy.ndimage import gaussian_filter
+import copy
+import warnings
+from pycbc.waveform import get_td_waveform
+from pycbc.psd import from_string
+from pycbc.filter import matched_filter, resample_to_delta_t, sigmasq
+from pycbc.types import TimeSeries as PyCBCTimeSeries
+
+# --- Global Constants & Mode Setting ---
+HYPERMORPHIC_MODE = "AdaptiveV13_Stronger"
+EPSILON_PHI_VALUE = 1e-50
+TMR_SAFETY_FACTOR_K = 2.0 
+
+warnings.filterwarnings('ignore')
+
+# --- Core HNum and HyperMorphic Math (Unchanged) ---
+class HNum:
+    def __init__(self, value, dimension=0):
+        self.dimension = dimension; self.history = [] 
+        current_epsilon_phi = EPSILON_PHI_VALUE
+        if isinstance(value, HNum):
+            self.value = value.value; self.is_epsilon = value.is_epsilon
+        elif isinstance(value, (int, float, complex)):
+            if HNum._is_numerically_epsilon(value): self.value = complex(current_epsilon_phi, 0); self.is_epsilon = True
+            elif HNum._is_numerically_zero(value): self.value = complex(current_epsilon_phi, 0); self.is_epsilon = True
+            else: self.value = complex(value); self.is_epsilon = False
+        elif isinstance(value, str) and value == "EPSILON_PHI":
+            self.value = complex(current_epsilon_phi, 0); self.is_epsilon = True
+        else: 
+            try:
+                val_complex = complex(value)
+                if HNum._is_numerically_zero(val_complex): self.value = complex(current_epsilon_phi, 0); self.is_epsilon = True
+                else: self.value = val_complex; self.is_epsilon = False
+            except (TypeError, ValueError): raise ValueError(f"Cannot initialize HNum with value: {value} of type {type(value)}")
+    @staticmethod
+    def _is_numerically_zero(val, tol_factor=0.001): return abs(val) < (EPSILON_PHI_VALUE * tol_factor)
+    @staticmethod
+    def _is_numerically_epsilon(val, tol_factor=10): return abs(val - EPSILON_PHI_VALUE) < (EPSILON_PHI_VALUE * tol_factor)
+    def __repr__(self):
+        if self.is_epsilon: return f"HNum(ε_ℍ@{EPSILON_PHI_VALUE:.0e}, dim={self.dimension})"
+        return f"HNum({self.value.real:.3e}{self.value.imag:+.3e}j, dim={self.dimension})"
+    def _prepare_operand(self, other):
+        if not isinstance(other, HNum): return HNum(other, self.dimension) 
+        return other
+    def _create_result(self, val, op_desc): return HNum(val, self.dimension) 
+    def add(self, other, op_ctx="add"):
+        other = self._prepare_operand(other)
+        if self.is_epsilon and other.is_epsilon: return HNum("EPSILON_PHI", self.dimension)
+        raw_val = self.value + other.value
+        phi = phi_dynamic_base(self.dimension, abs(raw_val), op_ctx)
+        if self.is_epsilon and not other.is_epsilon: result_val = complex_mod(other.value, phi)
+        elif not self.is_epsilon and other.is_epsilon: result_val = complex_mod(self.value, phi)
+        elif HNum._is_numerically_zero(raw_val): return HNum("EPSILON_PHI", self.dimension)
+        else: result_val = complex_mod(raw_val, phi)
+        return self._create_result(result_val, f"add({op_ctx})")
+    def multiply(self, other, op_ctx="mul"):
+        other = self._prepare_operand(other)
+        if self.is_epsilon or other.is_epsilon: return HNum("EPSILON_PHI", self.dimension)
+        raw_val = self.value * other.value
+        psi = psi_dynamic_modulus(self.dimension, abs(raw_val), op_ctx)
+        result_val = complex_mod(raw_val, psi)
+        if HNum._is_numerically_zero(result_val): return HNum("EPSILON_PHI", self.dimension)
+        return self._create_result(result_val, f"mul({op_ctx})")
+    def subtract(self, other, op_ctx="sub"):
+        other = self._prepare_operand(other)
+        if self.is_epsilon and other.is_epsilon: return HNum("EPSILON_PHI", self.dimension)
+        raw_val = self.value - other.value
+        phi = phi_dynamic_base(self.dimension, abs(raw_val), op_ctx)
+        if abs(raw_val) < EPSILON_PHI_VALUE * 0.1: return HNum("EPSILON_PHI", self.dimension)
+        result_val = complex_mod(raw_val, phi)
+        return self._create_result(result_val, f"sub({op_ctx})")
+    def divide(self, other, op_ctx="div"):
+        other = self._prepare_operand(other)
+        current_epsilon_phi = EPSILON_PHI_VALUE 
+        if other.is_epsilon:
+            raw_val = 1.0 + 0j if self.is_epsilon else self.value / complex(current_epsilon_phi, current_epsilon_phi)
+        elif HNum._is_numerically_zero(other.value):
+            raw_val = self.value / complex(current_epsilon_phi, current_epsilon_phi) if not self.is_epsilon else complex(current_epsilon_phi, 0)
+            if self.is_epsilon: return HNum("EPSILON_PHI", self.dimension)
+        elif self.is_epsilon: return HNum("EPSILON_PHI", self.dimension)
+        else: raw_val = self.value / other.value
+        psi = psi_dynamic_modulus(self.dimension, abs(raw_val), op_ctx)
+        result_val = complex_mod(raw_val, psi)
+        if HNum._is_numerically_zero(result_val): return HNum("EPSILON_PHI", self.dimension)
+        return self._create_result(result_val, f"div({op_ctx})")
+    def abs_H(self):
+        if self.is_epsilon: return HNum("EPSILON_PHI", self.dimension)
+        return HNum(abs(self.value), self.dimension)
+        
+def complex_mod(z, N):
+    if not isinstance(N, (int, float, np.number)) or N <= 0: return z 
+    real_part = np.fmod(z.real, N); imag_part = np.fmod(z.imag, N)
+    return complex(real_part, imag_part)
+
+def phi_dynamic_base(dimension, current_val_magnitude, op_context, params=None):
+    global HYPERMORPHIC_MODE
+    if params is None: params = {} 
+    if HYPERMORPHIC_MODE == "ClassicalMimicry": return int(1e18) 
+    elif HYPERMORPHIC_MODE == "AdaptiveV13_Stronger":
+        p = {'p1': 1.8, 'p2': 200, 'p3': 10}; p.update(params) 
+        if dimension == 0: base_val = 10 + (current_val_magnitude ** p['p1']) + current_val_magnitude * p['p2'] + np.log1p(current_val_magnitude) * p['p3']
+        else: base_val = 10 + dimension + 3 * np.sin(dimension * 0.3) + np.log1p(current_val_magnitude) * (dimension + 1) + (current_val_magnitude ** 1.5) + current_val_magnitude * ((dimension * 0.1) + 0.2)
+        return max(1, int(np.round(base_val)))
+    else: return 100 
+    
+def psi_dynamic_modulus(dimension, current_val_magnitude, op_context, params=None):
+    global HYPERMORPHIC_MODE
+    if params is None: params = {}
+    if HYPERMORPHIC_MODE == "ClassicalMimicry": return int(1e18) 
+    elif HYPERMORPHIC_MODE == "AdaptiveV13_Stronger":
+        p = {'p1': 1.8, 'p2': 100, 'p3': 2.5}; p.update(params)
+        if dimension == 0: mod_val = 150 + (current_val_magnitude ** p['p1']) + current_val_magnitude * p['p2'] + np.log1p(current_val_magnitude) * p['p3']
+        else: mod_val = 15 + dimension * 2 + 4 * np.cos(dimension * 0.2) + np.log1p(current_val_magnitude) * 0.5 * (dimension + 2) + (current_val_magnitude ** 1.2) + current_val_magnitude * (dimension * 0.05 + 0.1)
+        return max(1, int(np.round(mod_val)))
+    else: return 150 
+
+class HyperMorphicGWAnalyzer:
+    def __init__(self):
+        self.sample_rate = 4096  # Hz
+        self.gw_events = { 'GW150914': {'time': 1126259462.4, 'duration': 1.0, 'detectors': ['H1', 'L1'],
+                                     'params': {'mass1': 36, 'mass2': 29, 'spin1z': 0.3, 'spin2z': -0.4, 'approximant': 'SEOBNRv4_opt'}}}
+        self.results = {} 
+
+    def fetch_and_process_data(self, event='GW150914', detector='H1'):
+        print(f"\nAttempting to fetch and process real data for {event} ({detector})...")
+        event_info = self.gw_events.get(event)
+        if not event_info: print("  Event not found. Cannot proceed."); return None, None
+        gps_time = event_info['time']; target_duration = event_info['duration'] 
+        
+        fetch_duration = 32
+        fetch_start = gps_time - 16
+        fetch_end = gps_time + 16
+        
+        try:
+            data_fetched = TimeSeries.fetch_open_data(
+                detector, fetch_start, fetch_end, sample_rate=self.sample_rate,
+                cache=True, verbose=False, timeout=60
+            )
+            if data_fetched is None or len(data_fetched.value) == 0: 
+                raise ValueError("fetch_open_data returned no data.")
+            
+            data_whitened = data_fetched.whiten(fftlength=4, overlap=2)
+            
+            bp = filter_design.bandpass(30, 350, self.sample_rate)
+            data_filtered = data_whitened.filter(bp, filtfilt=True)
+            
+            final_data = data_filtered.crop(gps_time - target_duration/2, gps_time + target_duration/2)
+            
+            if final_data is None or len(final_data.value) < int(target_duration * self.sample_rate * 0.95):
+                raise ValueError(f"Final data segment is too short after processing.")
+
+            print(f"  Real data for {detector} ({event}) processed successfully.")
+            
+            delta_f = 1.0 / final_data.duration.value
+            psd_pycbc = from_string("aLIGOZeroDetHighPower", len(final_data.value)//2 + 1, delta_f, low_freq_cutoff=20)
+
+            return final_data, psd_pycbc
+
+        except Exception as e:
+            print(f"  Error during real data processing for {event} ({detector}): {e}")
+            return None, None
+
+    def create_gr_template(self, event_params, sample_rate, desired_len):
+        print("  Generating GR waveform template using PyCBC...")
+        hp, _ = get_td_waveform(approximant=event_params['approximant'],
+                                mass1=event_params['mass1'], mass2=event_params['mass2'],
+                                spin1z=event_params['spin1z'], spin2z=event_params['spin2z'],
+                                delta_t=1.0/sample_rate, f_lower=20)
+        
+        hp.resize(desired_len)
+        template = hp.cyclic_time_shift(hp.start_time)
+        return PyCBCTimeSeries(template, delta_t=1.0/sample_rate)
+
+    def align_and_scale_template(self, template_pycbc, data, psd_pycbc):
+        print("  Aligning GR template to real data using matched filtering...")
+        data_pycbc = PyCBCTimeSeries(data.value, delta_t=data.dt.value)
+        
+        psd_pycbc.resize(len(data_pycbc.to_frequencyseries()))
+        
+        snr = matched_filter(template_pycbc, data_pycbc, psd=psd_pycbc, low_frequency_cutoff=30)
+        
+        peak_idx = abs(snr).numpy().argmax()
+        snr_peak_complex = snr[peak_idx]
+        time_shift = snr.sample_times[peak_idx]
+        
+        aligned_template = template_pycbc.cyclic_time_shift(time_shift)
+        
+        aligned_template = aligned_template.astype(np.complex128)
+        
+        sigmasq_val = sigmasq(template_pycbc, psd=psd_pycbc, low_frequency_cutoff=30.0)
+        if sigmasq_val == 0: sigmasq_val = 1.0 
+        opt_scale = abs(snr_peak_complex) / sigmasq_val**0.5
+        aligned_template *= opt_scale
+        
+        phase_angle = np.angle(snr_peak_complex)
+        aligned_template *= np.exp(1j * phase_angle)
+        
+        return TimeSeries(aligned_template.numpy().real, sample_rate=data.sample_rate.value)
+
+    def compute_ripple_correction(self, real_data_array, gr_template_array):
+        print("  Computing HyperMorphic ripple correction term R(t)...")
+        if len(real_data_array) != len(gr_template_array):
+            min_len = min(len(real_data_array), len(gr_template_array))
+            real_data_array = real_data_array[:min_len]; gr_template_array = gr_template_array[:min_len]
+        
+        h_data = [HNum(v) for v in real_data_array]
+        h_template = [HNum(v) for v in gr_template_array]
+        
+        ripple_hnum = [d.subtract(t, "ripple_calc") for d, t in zip(h_data, h_template)]
+        ripple_signal = np.array([r.value.real for r in ripple_hnum])
+        return ripple_signal
+        
+    def calculate_rss(self, data, model):
+        if len(data) != len(model):
+            min_len = min(len(data), len(model))
+            data = data[:min_len]; model = model[:min_len]
+        return np.sum((data - model)**2)
+
+# --- Main Execution Block ---
+if __name__ == "__main__":
+    plt.close('all') 
+    analyzer = HyperMorphicGWAnalyzer() 
+
+    print("\n--- V21: Multi-Detector Falsifier ---")
+    event_to_analyze = 'GW150914'
+    event_info = analyzer.gw_events[event_to_analyze]
+    detectors = event_info['detectors']
+    
+    # Store results for each detector
+    results_by_detector = {}
+    
+    for detector in detectors:
+        real_data, psd = analyzer.fetch_and_process_data(event_to_analyze, detector)
+        
+        if real_data is not None and psd is not None:
+            print(f"--- Analyzing {event_to_analyze} for detector {detector} ---")
+            event_params = event_info['params']
+            gr_template = analyzer.create_gr_template(event_params, analyzer.sample_rate, len(real_data.value))
+            
+            gr_template_aligned = analyzer.align_and_scale_template(gr_template, real_data, psd)
+            
+            ripple_correction_signal = analyzer.compute_ripple_correction(real_data.value, gr_template_aligned.value)
+            
+            epsilon_scaling_factor = 0.05
+            hm_model_signal = gr_template_aligned.value + epsilon_scaling_factor * ripple_correction_signal
+
+            rss_gr = analyzer.calculate_rss(real_data.value, gr_template_aligned.value)
+            rss_hm = analyzer.calculate_rss(real_data.value, hm_model_signal)
+            
+            # Store results
+            results_by_detector[detector] = {'rss_gr': rss_gr, 'rss_hm': rss_hm}
+
+            # --- Plotting for each detector ---
+            fig, axes = plt.subplots(2, 1, figsize=(14, 10), facecolor='black', sharex=True, gridspec_kw={'height_ratios': [3, 1]})
+            fig.suptitle(f'V21 Falsifier: GR vs. HyperMorphic Model Fit for {event_to_analyze} ({detector})', fontsize=16, color='#BF40BF')
+            time_vec = real_data.times.value
+
+            axes[0].plot(time_vec, real_data.value, label=f'Real LIGO Data ({detector})', color='white', linewidth=2.5, alpha=0.8)
+            axes[0].plot(time_vec, gr_template_aligned.value, label=f'GR Model (RSS: {rss_gr:.2e})', color='#FF10F0', linestyle='--', linewidth=1.5)
+            axes[0].plot(time_vec, hm_model_signal, label=f'H-Model (RSS: {rss_hm:.2e})', color='#00FFFF', linestyle=':', linewidth=1.5)
+            axes[0].set_ylabel("Whitened Strain", color='#00FFFF'); axes[0].set_title("Waveform Comparison", color='#BF40BF')
+            axes[0].legend(facecolor='black', edgecolor='#BF40BF', labelcolor='white')
+            axes[0].set_xlim(time_vec.min(), time_vec.max())
+
+            residual_gr = real_data.value - gr_template_aligned.value
+            residual_hm = real_data.value - hm_model_signal
+            axes[1].plot(time_vec, residual_gr, label='GR Residual', color='#FF10F0', alpha=0.7)
+            axes[1].plot(time_vec, residual_hm, label='H-Model Residual', color='#00FFFF', alpha=0.7)
+            axes[1].set_xlabel("Time from event start (seconds)", color='#00FFFF'); axes[1].set_ylabel("Residual Strain", color='#00FFFF')
+            axes[1].set_title("Residuals (Data - Model)", color='#BF40BF')
+            axes[1].legend(facecolor='black', edgecolor='#BF40BF', labelcolor='white')
+            axes[1].set_xlim(time_vec.min(), time_vec.max())
+
+            for ax in axes:
+                ax.set_facecolor('black'); ax.grid(True, alpha=0.2, color='#6B0F9F', linestyle=':');
+                for spine in ax.spines.values(): spine.set_color('#BF40BF'); ax.tick_params(colors='#00E5FF')
+            
+            plt.tight_layout(rect=[0, 0, 1, 0.95])
+            fig.savefig(f'v21_falsifier_comparison_{detector}.png', dpi=150, facecolor='black')
+            plt.show()
+
+        else:
+            print(f"\nCRITICAL: Data acquisition for {detector} failed. Skipping detector.")
+
+    # --- Final Network Results ---
+    if results_by_detector:
+        network_rss_gr = sum(res['rss_gr'] for res in results_by_detector.values())
+        network_rss_hm = sum(res['rss_hm'] for res in results_by_detector.values())
+
+        print("\n\n" + "="*70)
+        print("          MULTI-DETECTOR FALSIFICATION: FINAL NETWORK RESULTS")
+        print("="*70)
+        print(f"  Event Analyzed: {event_to_analyze}")
+        print(f"  Detectors Analyzed: {list(results_by_detector.keys())}")
+        print(f"  Scaling Factor for H-Model Correction: {epsilon_scaling_factor}\n")
+        
+        print("--- Per-Detector Residual Sum of Squares (RSS) ---")
+        for detector, res in results_by_detector.items():
+            print(f"  {detector}:")
+            print(f"    - GR Model RSS : {res['rss_gr']:.6e}")
+            print(f"    - H-Model RSS  : {res['rss_hm']:.6e}")
+
+        print("\n--- Aggregated Network RSS ---")
+        print(f"  Network General Relativity (GR) Model RSS : {network_rss_gr:.6e}")
+        print(f"  Network HyperMorphic (GR + εR) Model RSS: {network_rss_hm:.6e}")
+        print("-"*70)
+
+        if network_rss_hm < network_rss_gr:
+            improvement = (network_rss_gr - network_rss_hm) / network_rss_gr * 100
+            print(f"  NETWORK CONCLUSION: The HyperMorphic model provides a BETTER fit.")
+            print(f"  Total Improvement in Residuals: {improvement:.4f}%")
+        else:
+            worsening = (network_rss_hm - network_rss_gr) / network_rss_gr * 100
+            print(f"  NETWORK CONCLUSION: The standard General Relativity model provides a better fit.")
+            print(f"  The H-Model was worse by: {worsening:.4f}%")
+        print("="*70 + "\n")
+    else:
+        print("\nNo detectors were successfully analyzed. Cannot produce network results.")
+
+    print("\n\n=== Analysis Complete ===")
+
