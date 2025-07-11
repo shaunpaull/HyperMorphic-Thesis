@@ -318,7 +318,333 @@ if __name__ == "__main__":
 
 
 
+#!/usr/bin/env python3
+"""
+HyperMorphic Gravitational Wave Analysis
+Framework V27.0: Polished and Finalized
+"""
 
+# --- Step 0: Installation for Google Colab & Imports ---
+try:
+    import gwpy
+except ImportError:
+    print("Installing gwpy... (requires internet connection)")
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "gwpy"])
+    print("gwpy installed.")
+
+try:
+    import pycbc
+except ImportError:
+    print("Installing pycbc... (requires internet connection, may take a moment)")
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pycbc"])
+    print("pycbc installed.")
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+import os
+from gwpy.timeseries import TimeSeries
+from pycbc.waveform import get_td_waveform
+from pycbc.psd import from_string
+from pycbc.filter import matched_filter, sigmasq
+from pycbc.types import TimeSeries as PyCBCTimeSeries
+import warnings
+
+# --- Global Constants & Mode Setting ---
+HYPERMORPHIC_MODE = "AdaptiveV13_Stronger"
+EPSILON_PHI_VALUE = 1e-50
+warnings.filterwarnings('ignore')
+plt.style.use('seaborn-v0_8-darkgrid')
+
+# --- Core HNum and HyperMorphic Math (Unchanged) ---
+class HNum:
+    def __init__(self, value, dimension=0):
+        self.dimension = dimension; self.history = []
+        current_epsilon_phi = EPSILON_PHI_VALUE
+        if isinstance(value, HNum):
+            self.value = value.value; self.is_epsilon = value.is_epsilon
+        elif isinstance(value, (int, float, complex)):
+            if HNum._is_numerically_epsilon(value): self.value = complex(current_epsilon_phi, 0); self.is_epsilon = True
+            elif HNum._is_numerically_zero(value): self.value = complex(current_epsilon_phi, 0); self.is_epsilon = True
+            else: self.value = complex(value); self.is_epsilon = False
+        elif isinstance(value, str) and value == "EPSILON_PHI":
+            self.value = complex(current_epsilon_phi, 0); self.is_epsilon = True
+        else:
+            try:
+                val_complex = complex(value)
+                if HNum._is_numerically_zero(val_complex): self.value = complex(current_epsilon_phi, 0); self.is_epsilon = True
+                else: self.value = val_complex; self.is_epsilon = False
+            except (TypeError, ValueError): raise ValueError(f"Cannot initialize HNum with value: {value} of type {type(value)}")
+    @staticmethod
+    def _is_numerically_zero(val, tol_factor=0.001): return abs(val) < (EPSILON_PHI_VALUE * tol_factor)
+    @staticmethod
+    def _is_numerically_epsilon(val, tol_factor=10): return abs(val - EPSILON_PHI_VALUE) < (EPSILON_PHI_VALUE * tol_factor)
+    def __repr__(self):
+        if self.is_epsilon: return f"HNum(ε_ℍ@{EPSILON_PHI_VALUE:.0e}, dim={self.dimension})"
+        return f"HNum({self.value.real:.3e}{self.value.imag:+.3e}j, dim={self.dimension})"
+    def _prepare_operand(self, other):
+        if not isinstance(other, HNum): return HNum(other, self.dimension)
+        return other
+    def _create_result(self, val, op_desc): return HNum(val, self.dimension)
+    def add(self, other, op_ctx="add"):
+        other = self._prepare_operand(other)
+        if self.is_epsilon and other.is_epsilon: return HNum("EPSILON_PHI", self.dimension)
+        raw_val = self.value + other.value
+        phi = phi_dynamic_base(self.dimension, abs(raw_val), op_ctx)
+        if self.is_epsilon and not other.is_epsilon: result_val = complex_mod(other.value, phi)
+        elif not self.is_epsilon and other.is_epsilon: result_val = complex_mod(self.value, phi)
+        elif HNum._is_numerically_zero(raw_val): return HNum("EPSILON_PHI", self.dimension)
+        else: result_val = complex_mod(raw_val, phi)
+        return self._create_result(result_val, f"add({op_ctx})")
+    def multiply(self, other, op_ctx="mul"):
+        other = self._prepare_operand(other)
+        if self.is_epsilon or other.is_epsilon: return HNum("EPSILON_PHI", self.dimension)
+        raw_val = self.value * other.value
+        psi = psi_dynamic_modulus(self.dimension, abs(raw_val), op_ctx)
+        result_val = complex_mod(raw_val, psi)
+        if HNum._is_numerically_zero(result_val): return HNum("EPSILON_PHI", self.dimension)
+        return self._create_result(result_val, f"mul({op_ctx})")
+
+def complex_mod(z, N):
+    if not isinstance(N, (int, float, np.number)) or N <= 0: return z
+    real_part = np.fmod(z.real, N); imag_part = np.fmod(z.imag, N)
+    return complex(real_part, imag_part)
+
+def phi_dynamic_base(dimension, current_val_magnitude, op_context, params=None):
+    global HYPERMORPHIC_MODE
+    if params is None: params = {}
+    if HYPERMORPHIC_MODE == "AdaptiveV13_Stronger":
+        p = {'p1': 1.8, 'p2': 200, 'p3': 10}; p.update(params)
+        base_val = 10 + (current_val_magnitude ** p['p1']) + current_val_magnitude * p['p2'] + np.log1p(current_val_magnitude) * p['p3']
+        return max(1, int(np.round(base_val)))
+    return 100
+
+def psi_dynamic_modulus(dimension, current_val_magnitude, op_context, params=None):
+    global HYPERMORPHIC_MODE
+    if params is None: params = {}
+    if HYPERMORPHIC_MODE == "AdaptiveV13_Stronger":
+        p = {'p1': 1.8, 'p2': 100, 'p3': 2.5}; p.update(params)
+        mod_val = 150 + (current_val_magnitude ** p['p1']) + current_val_magnitude * p['p2'] + np.log1p(current_val_magnitude) * p['p3']
+        return max(1, int(np.round(mod_val)))
+    return 150
+
+class AnalysisVisualizer:
+    def __init__(self, output_dir='GW_Analysis_Plots'):
+        self.output_dir = output_dir
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
+        print(f"Visualizations will be saved to '{self.output_dir}/'")
+
+    def plot_event_summary(self, event_name, detector, times, data, gr_aligned, hm_aligned, rss_gr, rss_hm):
+        print(f"  -> Generating visualization for {event_name}-{detector}...")
+        t0 = times[len(times)//2]
+        plot_times = times - t0
+        fig = plt.figure(figsize=(18, 12)); gs = GridSpec(2, 1, height_ratios=[2, 1], hspace=0.05)
+        ax1 = fig.add_subplot(gs[0])
+        ax1.plot(plot_times, data, color='black', alpha=0.6, label='Real Detector Data (Whitened)', linewidth=1.5)
+        ax1.plot(plot_times, gr_aligned, color='#1f77b4', label=f'GR Model (RSS: {rss_gr:.3e})', linewidth=2.5)
+        ax1.plot(plot_times, hm_aligned, color='#ff7f0e', linestyle='--', label=f'HM Model (RSS: {rss_hm:.3e})', linewidth=2.5)
+        ax1.set_ylabel('Strain (Whitened & Scaled)', fontsize=14); ax1.legend(fontsize=12, loc='upper left')
+        ax1.set_title(f'Hyper-Detailed Model Comparison for {event_name} at {detector}', fontsize=18, pad=20)
+        ax1.grid(True, which='both', linestyle='--', linewidth=0.5); ax1.axvline(0, color='crimson', linestyle=':', linewidth=2, label='Event Time (GPS 0)')
+        peak_time_idx = np.argmax(np.abs(data)); zoom_window = 0.1
+        ax1.set_xlim(plot_times[peak_time_idx] - zoom_window, plot_times[peak_time_idx] + zoom_window)
+        ax1.set_xticklabels([])
+        ax2 = fig.add_subplot(gs[1], sharex=ax1)
+        residual_gr = data - gr_aligned; residual_hm = data - hm_aligned
+        ax2.plot(plot_times, residual_gr, color='#1f77b4', alpha=0.8, label='GR Residual (Data - Model)')
+        ax2.plot(plot_times, residual_hm, color='#ff7f0e', alpha=0.8, linestyle='--', label='HM Residual (Data - Model)')
+        ax2.set_xlabel('Time from Event [s]', fontsize=14); ax2.set_ylabel('Residual Strain', fontsize=14)
+        ax2.legend(fontsize=12, loc='upper left'); ax2.grid(True, which='both', linestyle='--', linewidth=0.5)
+        ax2.axvline(0, color='crimson', linestyle=':', linewidth=2)
+        plt.tight_layout()
+        filename = os.path.join(self.output_dir, f"{event_name}_{detector}_Model_Comparison.png")
+        plt.savefig(filename, dpi=300); plt.close(fig)
+        print(f"     ... saved to {filename}")
+
+    def plot_q_transform(self, data, event_name, detector, proc_params):
+        print(f"  -> Generating Q-transform for {event_name}-{detector}...")
+        qtrans = data.q_transform(frange=proc_params['bandpass'], qrange=(5, 110), outseg=data.xspan, whiten=False)
+        fig = qtrans.plot(figsize=[18, 5]); ax = fig.gca()
+        ax.set_title(f'Time-Frequency Analysis of Signal: {event_name} at {detector}', fontsize=18)
+        ax.set_ylabel('Frequency [Hz]', fontsize=14); ax.set_xlabel('Time from Event [s]', fontsize=14)
+        ax.colorbar(label='Normalized Energy'); ax.epoch = data.epoch
+        filename = os.path.join(self.output_dir, f"{event_name}_{detector}_Q_Transform.png")
+        plt.savefig(filename, dpi=300); plt.close(fig)
+        print(f"     ... saved to {filename}")
+
+    def plot_final_summary(self, results):
+        event_names = list(results.keys()); gr_rss = [res['network_rss_gr'] for res in results.values()]
+        hm_rss = [res['network_rss_hm'] for res in results.values()]
+        x = np.arange(len(event_names)); width = 0.35
+        fig, ax = plt.subplots(figsize=(14, 8))
+        rects1 = ax.bar(x - width/2, gr_rss, width, label='GR Model', color='#1f77b4')
+        rects2 = ax.bar(x + width/2, hm_rss, width, label='HM Model', color='#ff7f0e')
+        ax.set_ylabel('Total Network Residual Sum of Squares (RSS)', fontsize=14)
+        ax.set_title('Final Model Comparison Across All Analyzed Events', fontsize=18, pad=20)
+        ax.set_xticks(x); ax.set_xticklabels(event_names, fontsize=12); ax.legend(fontsize=12)
+        ax.set_yscale('log'); ax.set_ylabel(ax.get_ylabel() + " (Log Scale)")
+        fig.tight_layout()
+        filename = os.path.join(self.output_dir, "FINAL_Network_RSS_Comparison.png")
+        plt.savefig(filename, dpi=300); plt.close(fig)
+        print(f"\nFinal summary plot saved to {filename}")
+
+class HyperMorphicGWAnalyzer:
+    def __init__(self):
+        self.sample_rate = 4096
+        self.gw_events = {
+            'GW150914': {'time': 1126259462.4, 'duration': 1.0, 'detectors': ['H1', 'L1'], 'proc': {'fft': 4, 'overlap': 2, 'bandpass': (30, 350), 'psd_model': "aLIGOZeroDetHighPower"}, 'params': {'mass1': 36, 'mass2': 29, 'spin1z': 0.3, 'spin2z': -0.4, 'approximant': 'SEOBNRv4_opt'}},
+            'GW170817': {'time': 1187008882.4, 'duration': 32.0, 'detectors': ['H1', 'L1', 'V1'], 'proc': {'fft': 8, 'overlap': 4, 'bandpass': (23, 1024), 'psd_model': "aLIGOZeroDetHighPower"}, 'params': {'mass1': 1.46, 'mass2': 1.27, 'spin1z': 0.0, 'spin2z': 0.0, 'approximant': 'IMRPhenomD_NRTidal'}},
+            'GW190521': {'time': 1242442967.4, 'duration': 0.5, 'detectors': ['H1', 'L1', 'V1'], 'proc': {'fft': 4, 'overlap': 2, 'bandpass': (20, 200), 'psd_model': "aLIGOZeroDetHighPower"}, 'params': {'mass1': 85, 'mass2': 66, 'spin1z': 0.7, 'spin2z': 0.6, 'approximant': 'SEOBNRv4_opt'}}
+        }
+
+    def fetch_and_process_data(self, event_name, detector):
+        print(f"\nAttempting to fetch and process real data for {event_name} ({detector})...")
+        event_info = self.gw_events[event_name]
+        gps_time, target_duration, proc_params = event_info['time'], event_info['duration'], event_info['proc']
+        try:
+            data_fetched = TimeSeries.fetch_open_data(detector, gps_time - 64, gps_time + 64, sample_rate=self.sample_rate, cache=True, verbose=False, timeout=60)
+            data_whitened = data_fetched.whiten(fftlength=proc_params['fft'], overlap=proc_params['overlap'])
+            data_filtered = data_whitened.bandpass(proc_params['bandpass'][0], proc_params['bandpass'][1])
+            final_data = data_filtered.crop(gps_time - target_duration/2, gps_time + target_duration/2)
+            final_data.epoch = gps_time
+            print(f"  Real data for {detector} ({event_name}) processed successfully.")
+            delta_f = 1.0 / final_data.duration.value
+            psd_pycbc = from_string(proc_params['psd_model'], len(final_data.value)//2 + 1, delta_f, low_freq_cutoff=proc_params['bandpass'][0])
+            return final_data, psd_pycbc
+        except Exception as e:
+            print(f"  Error during real data processing for {event_name} ({detector}): {e}")
+            return None, None
+
+    def create_gr_template(self, event_params, desired_len):
+        print("  Generating standard General Relativity (GR) template...")
+        params_copy = event_params.copy()
+        f_lower = params_copy.pop('f_lower', 20)
+        approximant = params_copy.pop('approximant')
+        hp, _ = get_td_waveform(approximant=approximant, **params_copy, delta_t=1.0/self.sample_rate, f_lower=f_lower)
+        hp.resize(desired_len)
+        return PyCBCTimeSeries(hp.cyclic_time_shift(hp.start_time), delta_t=1.0/self.sample_rate)
+
+    def _get_hypermorphic_params(self, gr_params):
+        print("    -> Applying HM theory to physical parameters...")
+        hm_params = gr_params.copy()
+        m1 = HNum(hm_params['mass1']); m2 = HNum(hm_params['mass2']); s1z = HNum(hm_params['spin1z'])
+        m1_effective = m1.add(m2.multiply(HNum(0.015)))
+        s1z_effective = s1z.add(HNum(0.05))
+        hm_params['mass1'] = m1_effective.value.real; hm_params['spin1z'] = s1z_effective.value.real
+        print(f"    -> Original mass1: {gr_params['mass1']:.2f}, HM effective mass1: {hm_params['mass1']:.2f}")
+        return hm_params
+
+    def create_hypermorphic_template(self, event_params, desired_len):
+        print("  Generating INDEPENDENT Hypermorphic (HM) template...")
+        hm_event_params = self._get_hypermorphic_params(event_params)
+        params_copy = hm_event_params.copy()
+        f_lower = params_copy.pop('f_lower', 20)
+        approximant = params_copy.pop('approximant')
+        hp, _ = get_td_waveform(approximant=approximant, **params_copy, delta_t=1.0/self.sample_rate, f_lower=f_lower)
+        hp.resize(desired_len)
+        return PyCBCTimeSeries(hp.cyclic_time_shift(hp.start_time), delta_t=1.0/self.sample_rate)
+
+    def align_and_scale_template(self, template_pycbc, data, psd_pycbc, f_low):
+        print(f"  Aligning template to data...")
+        data_pycbc = PyCBCTimeSeries(data.value, delta_t=data.dt.value)
+        psd_pycbc.resize(len(data_pycbc.to_frequencyseries()))
+        snr = matched_filter(template_pycbc, data_pycbc, psd=psd_pycbc, low_frequency_cutoff=f_low)
+        peak_idx = abs(snr).numpy().argmax()
+        snr_peak_complex = snr[peak_idx]
+        time_shift = snr.sample_times[peak_idx]
+        aligned_template = template_pycbc.cyclic_time_shift(time_shift)
+        aligned_template = aligned_template.astype(np.complex128)
+        sigmasq_val = sigmasq(template_pycbc, psd=psd_pycbc, low_frequency_cutoff=f_low)
+        opt_scale = abs(snr_peak_complex) / (sigmasq_val**0.5 if sigmasq_val > 0 else 1)
+        aligned_template *= opt_scale
+        phase_angle = np.angle(snr_peak_complex)
+        aligned_template *= np.exp(1j * phase_angle)
+        return TimeSeries(aligned_template.numpy().real, sample_rate=data.sample_rate.value, epoch=data.epoch)
+
+    def calculate_rss(self, data, model):
+        return np.sum((data - model)**2)
+
+# --- Main Execution Block ---
+if __name__ == "__main__":
+    plt.close('all')
+    analyzer = HyperMorphicGWAnalyzer()
+    visualizer = AnalysisVisualizer()
+
+    events_to_run = ['GW150914', 'GW170817', 'GW190521']
+    final_results = {}
+
+    for event_name in events_to_run:
+        print("\n\n" + "#"*80)
+        print(f"###   STARTING ANALYSIS FOR EVENT: {event_name.upper()}   ###")
+        print("#"*80)
+        
+        event_info = analyzer.gw_events[event_name]
+        results_by_detector = {}
+        
+        for detector in event_info['detectors']:
+            real_data, psd = analyzer.fetch_and_process_data(event_name, detector)
+            if real_data is None:
+                results_by_detector[detector] = None
+                continue
+
+            print("\nStep 1: Generate the two INDEPENDENT models from source parameters.")
+            event_params = event_info['params'].copy()
+            f_low = event_info['proc']['bandpass'][0]
+            event_params['f_lower'] = f_low
+            
+            gr_template = analyzer.create_gr_template(event_params, len(real_data.value))
+            hm_template = analyzer.create_hypermorphic_template(event_params, len(real_data.value))
+            
+            print("\nStep 2: Align EACH model to the data independently.")
+            gr_aligned = analyzer.align_and_scale_template(gr_template, real_data, psd, f_low)
+            hm_aligned = analyzer.align_and_scale_template(hm_template, real_data, psd, f_low)
+
+            print("\nStep 3: Calculate RSS and generate visualizations.")
+            rss_gr = analyzer.calculate_rss(real_data.value, gr_aligned.value)
+            rss_hm = analyzer.calculate_rss(real_data.value, hm_aligned.value)
+            results_by_detector[detector] = {'rss_gr': rss_gr, 'rss_hm': rss_hm}
+            
+            visualizer.plot_q_transform(real_data, event_name, detector, event_info['proc'])
+            visualizer.plot_event_summary(event_name, detector, real_data.times.value, real_data.value, gr_aligned.value, hm_aligned.value, rss_gr, rss_hm)
+
+        valid_results = {k: v for k, v in results_by_detector.items() if v is not None}
+        if valid_results:
+            network_rss_gr = sum(res['rss_gr'] for res in valid_results.values())
+            # =================================================================================
+            # --- FINAL FIX: Corrected the typo from 'hm_rss' to 'rss_hm' ---
+            # =================================================================================
+            network_rss_hm = sum(res['rss_hm'] for res in valid_results.values())
+            final_results[event_name] = {'network_rss_gr': network_rss_gr, 'network_rss_hm': network_rss_hm}
+
+            print("\n" + "="*70)
+            print(f"             INDEPENDENT TEST: FINAL RESULTS FOR {event_name}")
+            print("="*70)
+            print(f"  Detectors Analyzed: {list(valid_results.keys())}\n")
+            print(f"  Network General Relativity (GR) Model RSS : {network_rss_gr:.6e}")
+            print(f"  Network Hypermorphic (HM) Model RSS       : {network_rss_hm:.6e}")
+            print("-"*70)
+
+            if network_rss_hm < network_rss_gr:
+                improvement = (network_rss_gr - network_rss_hm) / network_rss_gr * 100
+                print(f"  CONCLUSION: The independent Hypermorphic model provides a BETTER fit.")
+                print(f"  Total Improvement in Residuals: {improvement:.4f}%")
+            else:
+                worsening = abs(network_rss_hm - network_rss_gr) / network_rss_gr * 100
+                print(f"  CONCLUSION: The standard General Relativity model provides a better fit.")
+                print(f"  The HM-Model was worse by: {worsening:.4f}%")
+            print("="*70)
+        else:
+            print(f"\nNo detectors were successfully analyzed for {event_name}.")
+
+    if final_results:
+        visualizer.plot_final_summary(final_results)
+
+    print("\n\n=== All Analyses Complete ===")
 
 
 
