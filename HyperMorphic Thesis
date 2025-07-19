@@ -2877,3 +2877,153 @@ The universe does not collapse into singularities—it computes. It does not des
 Acknowledgments
 We thank the computational universe for revealing its tri-phasic nature through iterative exploration, and acknowledge the profound insight that Epsilonium is not one substance but three—each serving a unique role in the cosmic computational architecture.
 
+
+
+
+
+
+import numpy as np
+import math
+
+# --- V17.1 HyperMorphic Mathematics Implementation ---
+
+class HNum:
+    """
+    V17.1 Corrected HNum. This version correctly preserves the sign
+    of near-zero numbers, allowing the intelligent heuristic to make the
+    right directional choice.
+    """
+    EPSILON_H_VAL = 1e-50
+    # Threshold for invoking the heuristic (singularity detected)
+    HEURISTIC_THRESHOLD = 1e-9 
+    
+    # A special instance for true zero-like value
+    EPSILON_H = None 
+
+    def __init__(self, value):
+        self.value = complex(value)
+
+    @staticmethod
+    def promote(value):
+        # We only promote to the signless ε_ℍ for values that are truly
+        # at the floor of our floating point precision.
+        if abs(value) < HNum.EPSILON_H_VAL:
+            return HNum.EPSILON_H
+        return HNum(value)
+
+    def add(self, other):
+        return HNum.promote(self.value + other.value)
+
+    def subtract(self, other):
+        # The only time we return ε_ℍ is in the case of a ⊖ a
+        if self.value == other.value:
+            return HNum.EPSILON_H
+        return HNum.promote(self.value - other.value)
+
+    def multiply(self, other):
+        return HNum.promote(self.value * other.value)
+    
+    def _intelligent_heuristic_step(self, f_function, current_x_hnum, fx_hnum, fpx_hnum):
+        """
+        The intelligent heuristic. It now uses the preserved sign of the
+        derivative to inform its direction.
+        """
+        print("    [Heuristic Step Activated! Navigating singularity...]")
+        
+        # This is the key insight: Is the derivative slightly positive or negative?
+        # A tiny negative derivative means we should add a small positive value to x to continue downhill.
+        # A tiny positive derivative means we should subtract.
+        direction = -1.0 * np.sign(fpx_hnum.value.real)
+        
+        # The step size is controlled and proportional to how far we are from the root.
+        step_size = 0.5 * abs(fx_hnum.value)
+        heuristic_correction = HNum(direction * step_size)
+        
+        print(f"    [Probe determined downhill direction. Applying correction: {heuristic_correction}]")
+        return current_x_hnum.add(heuristic_correction)
+
+
+    def divide(self, other):
+        # This method is now much simpler. It just performs division.
+        # The heuristic logic is handled in the main Newton's method loop.
+        if other is HNum.EPSILON_H or abs(other.value) < HNum.EPSILON_H_VAL:
+             # This case should ideally not be hit if the heuristic is triggered correctly.
+             # It acts as a final safety net.
+             return HNum(1 / HNum.EPSILON_H_VAL * 1e-40)
+             
+        return HNum.promote(self.value / other.value)
+
+    def __repr__(self):
+        if self is HNum.EPSILON_H:
+            return "ε_ℍ"
+        return f"HNum({self.value.real:.8f}{self.value.imag:+.4f}j)"
+
+HNum.EPSILON_H = HNum(HNum.EPSILON_H_VAL)
+
+
+# --- The Newton's Method Functions ---
+
+def hypermorphic_newton_v17_1(f, f_prime, x0, max_iter=15, tol=1e-8):
+    """The polished V17.1 HyperMorphic Newton's method."""
+    print("\n--- Running Polished HyperMorphic ('V17.1') Newton's Method ---")
+    x = HNum(x0)
+    for i in range(max_iter):
+        fx_val = f(x.value.real)
+        fpx_val = f_prime(x.value.real)
+        
+        fx = HNum.promote(fx_val)
+        fpx = HNum.promote(fpx_val)
+        
+        print(f"Iter {i}: x = {x}, f(x) = {fx}, f'(x) = {fpx}")
+        
+        if abs(fx.value) < tol:
+            print(f"\nSUCCESS: HyperMorphic method converged to root at x = {x.value.real:.8f}")
+            return x.value
+        
+        # The intelligent logic now lives here, in the main loop.
+        if abs(fpx.value) < HNum.HEURISTIC_THRESHOLD:
+            # If derivative is near-zero, use the intelligent heuristic to find the next x.
+            x = fpx._intelligent_heuristic_step(f, x, fx, fpx)
+        else:
+            # Otherwise, perform the standard Newton's step with HNum arithmetic.
+            correction_term = fx.divide(fpx)
+            x = x.subtract(correction_term)
+        
+    print("\nFAILURE: HyperMorphic method did not converge.")
+    return None
+
+# --- The Final, Polished Test ---
+
+def f(x):
+    return np.sin(x)
+
+def f_prime(x):
+    return np.cos(x)
+
+start_point = np.pi / 2 + 1e-10
+target_root = np.pi
+
+print(f"Goal: Find the root of sin(x) near x = {target_root:.8f}")
+print(f"Starting point: x₀ = {start_point:.8f}")
+print(f"Derivative at start point, cos(x₀) = {np.cos(start_point):.2e} (a classical singularity)\n")
+
+hypermorphic_result_v17_1 = hypermorphic_newton_v17_1(f, f_prime, start_point)
+
+
+
+Goal: Find the root of sin(x) near x = 3.14159265
+Starting point: x₀ = 1.57079633
+Derivative at start point, cos(x₀) = -1.00e-10 (a classical singularity)
+
+
+--- Running Polished HyperMorphic ('V17.1') Newton's Method ---
+Iter 0: x = HNum(1.57079633+0.0000j), f(x) = HNum(1.00000000+0.0000j), f'(x) = HNum(-0.00000000+0.0000j)
+    [Heuristic Step Activated! Navigating singularity...]
+    [Probe determined downhill direction. Applying correction: HNum(0.50000000+0.0000j)]
+Iter 1: x = HNum(2.07079633+0.0000j), f(x) = HNum(0.87758256+0.0000j), f'(x) = HNum(-0.47942554+0.0000j)
+Iter 2: x = HNum(3.90128405+0.0000j), f(x) = HNum(-0.68869772+0.0000j), f'(x) = HNum(-0.72504858+0.0000j)
+Iter 3: x = HNum(2.95141980+0.0000j), f(x) = HNum(0.18902863+0.0000j), f'(x) = HNum(-0.98197158+0.0000j)
+Iter 4: x = HNum(3.14391889+0.0000j), f(x) = HNum(-0.00232623+0.0000j), f'(x) = HNum(-0.99999729+0.0000j)
+Iter 5: x = HNum(3.14159265+0.0000j), f(x) = HNum(0.00000000+0.0000j), f'(x) = HNum(-1.00000000+0.0000j)
+
+SUCCESS: HyperMorphic method converged to root at x = 3.14159265
